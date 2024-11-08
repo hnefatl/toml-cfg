@@ -115,27 +115,13 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let struct_defn =
         syn::parse::<syn::ItemStruct>(item).expect("Failed to parse configuration structure!");
 
-    let require_cfg_present = if let Ok(val) = env::var("TOML_CFG") {
-        val.contains("require_cfg_present")
-    } else {
-        false
-    };
+    let require_cfg_present = env::var("TOML_CFG").is_ok_and(|v| v.contains("require_cfg_present"));
 
-    let root_path = find_root_path();
-    let cfg_path = root_path.clone();
-    let cfg_path = cfg_path.as_ref().map(|c| {
-        let mut x = c.to_owned();
-        x.push("cfg.toml");
-        x
-    });
-
+    let cfg_path = find_root_path().map(|c| c.join("cfg.toml"));
     let maybe_cfg = cfg_path.as_ref().and_then(|c| load_crate_cfg(c));
-    let got_cfg = maybe_cfg.is_some();
-    if require_cfg_present {
-        assert!(
-            got_cfg,
-            "TOML_CFG=require_cfg_present set, but valid config not found!"
-        )
+
+    if require_cfg_present && maybe_cfg.is_none() {
+        panic!("TOML_CFG=require_cfg_present set, but valid config not found!")
     }
     let cfg = maybe_cfg.unwrap_or_default();
 
@@ -151,12 +137,8 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let default = field
             .attrs
             .iter()
-            .find_map(|a| {
-                a.path()
-                    .is_ident("default")
-                    .then(|| a.parse_args::<Expr>().ok())
-            })
-            .flatten()
+            .find(|a| a.path().is_ident("default"))
+            .and_then(|a| a.parse_args::<Expr>().ok())
             .unwrap_or_else(|| {
                 panic!(
                     "Failed to find `#[default(...)]` attribute for field `{}`.",
