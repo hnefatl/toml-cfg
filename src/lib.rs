@@ -123,13 +123,13 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let root_path = find_root_path();
     let cfg_path = root_path.clone();
-    let cfg_path = cfg_path.as_ref().and_then(|c| {
+    let cfg_path = cfg_path.as_ref().map(|c| {
         let mut x = c.to_owned();
         x.push("cfg.toml");
-        Some(x)
+        x
     });
 
-    let maybe_cfg = cfg_path.as_ref().and_then(|c| load_crate_cfg(&c));
+    let maybe_cfg = cfg_path.as_ref().and_then(|c| load_crate_cfg(c));
     let got_cfg = maybe_cfg.is_some();
     if require_cfg_present {
         assert!(
@@ -137,7 +137,7 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
             "TOML_CFG=require_cfg_present set, but valid config not found!"
         )
     }
-    let cfg = maybe_cfg.unwrap_or_else(|| Defn::default());
+    let cfg = maybe_cfg.unwrap_or_default();
 
     let mut struct_defn_fields = TokenStream2::new();
     let mut struct_inst_fields = TokenStream2::new();
@@ -157,10 +157,12 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     .then(|| a.parse_args::<Expr>().ok())
             })
             .flatten()
-            .expect(&format!(
-                "Failed to find `#[default(...)]` attribute for field `{}`.",
-                ident.to_string(),
-            ));
+            .unwrap_or_else(|| {
+                panic!(
+                    "Failed to find `#[default(...)]` attribute for field `{}`.",
+                    ident
+                )
+            });
 
         let ty = field.ty;
 
@@ -168,10 +170,8 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let val = match cfg.vals.get(&ident.to_string()) {
             Some(t) => {
                 let t_string = t.to_string();
-                syn::parse_str::<Expr>(&t_string).expect(&format!(
-                    "Failed to parse `{}` as a valid token!",
-                    &t_string
-                ))
+                syn::parse_str::<Expr>(&t_string)
+                    .unwrap_or_else(|_| panic!("Failed to parse `{}` as a valid token!", &t_string))
             }
             None => default,
         };
@@ -220,7 +220,7 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn load_crate_cfg(path: &Path) -> Option<Defn> {
-    let contents = std::fs::read_to_string(&path).ok()?;
+    let contents = std::fs::read_to_string(path).ok()?;
     let parsed = toml::from_str::<Config>(&contents).ok()?;
     let name = env::var("CARGO_PKG_NAME").ok()?;
     parsed.crates.get(&name).cloned()
