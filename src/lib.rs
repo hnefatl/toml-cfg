@@ -60,33 +60,56 @@
 //! # Print the "buffer_size" value from the `lib-one` crate.
 //! # Since it has no cfg.toml, we just get the default value.
 //! $ cd pkg-example/lib-one
-//! $ cargo run
-//!     Finished dev [unoptimized + debuginfo] target(s) in 0.01s
-//!      Running `target/debug/lib-one`
+//! $ cargo run -- quiet
 //! 32
 //!
 //! # Print the "greeting" value from the `lib-two` crate.
 //! # Since it has no cfg.toml, we just get the default value.
 //! $ cd ../lib-two
-//! $ cargo run
-//!    Compiling lib-two v0.1.0 (/home/james/personal/toml-cfg/pkg-example/lib-two)
-//!     Finished dev [unoptimized + debuginfo] target(s) in 0.32s
-//!      Running `target/debug/lib-two`
+//! $ cargo run --quiet
 //! hello
 //!
 //! # Print the "buffer_size" value from `lib-one`, and "greeting"
 //! # from `lib-two`. Since we HAVE defined a `cfg.toml` file, the
 //! # values defined there are used instead.
 //! $ cd ../application
-//! $ cargo run
-//!    Compiling lib-two v0.1.0 (/home/james/personal/toml-cfg/pkg-example/lib-two)
-//!    Compiling application v0.1.0 (/home/james/personal/toml-cfg/pkg-example/application)
-//!     Finished dev [unoptimized + debuginfo] target(s) in 0.30s
-//!      Running `target/debug/application`
+//! $ cargo run --quiet
 //! 4096
 //! Guten tag!
 //! ```
 //!
+//! ### `#[required]` fields
+//!
+//! ```rust
+//! #[toml_cfg::toml_config]
+//! pub struct Config {
+//!     #[required]
+//!     wifi_ssid: &'static str,
+//!     // If empty assume unencrypted.
+//!     #[default("")]
+//!     wifi_passkey: &'static str,
+//! }
+//! ```
+//!
+//! ```toml
+//! [failing-config]
+//! # Oops, I forgot to set `wifi_ssid`.
+//! wifi_passkey = "my_password"
+//! ```
+//!
+//! ```console
+//! $ cd ../failing-config
+//! $ cargo build --quiet
+//! error: custom attribute panicked
+//!  --> src/lib.rs:3:1
+//!   |
+//! 3 | #[toml_cfg::toml_config]
+//!   | ^^^^^^^^^^^^^^^^^^^^^^^^
+//!   |
+//!   = help: message: Field `wifi_ssid`: required but no value was provided in the config file.
+//!
+//! error: could not compile `failing-config` (lib) due to 1 previous error
+//! ```
 
 use heck::ToShoutySnekCase;
 use proc_macro::TokenStream;
@@ -133,31 +156,34 @@ pub fn toml_config(_attr: TokenStream, item: TokenStream) -> TokenStream {
             .ident
             .expect("Failed to find field identifier. Don't use this on a tuple struct.");
 
-        // Determine the default value, declared using the `#[default(...)]` syntax
-        let default = field
-            .attrs
-            .iter()
-            .find(|a| a.path().is_ident("default"))
-            .and_then(|a| a.parse_args::<Expr>().ok())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Failed to find `#[default(...)]` attribute for field `{}`.",
-                    ident
-                )
-            });
+        // Find any field attributes: `[default(...)]` or `#[required]`
+        let default_attribute = field.attrs.iter().find(|a| a.path().is_ident("default"));
+        let required_attribute = field.attrs.iter().find(|a| a.path().is_ident("required"));
+        // Reject e.g. `#[required(0)]`, it shouldn't have any arguments.
+        if let Some(e) = required_attribute.and_then(|a| a.meta.require_path_only().err()) {
+            panic!(
+                "Field `{}`: unexpected arguments to `#[required]`: {}",
+                ident, e
+            );
+        }
 
-        let ty = field.ty;
-
-        // Is this field overridden?
+        // Is this field provided by the config file?
         let val = match cfg.vals.get(&ident.to_string()) {
             Some(t) => {
                 let t_string = t.to_string();
                 syn::parse_str::<Expr>(&t_string)
-                    .unwrap_or_else(|_| panic!("Failed to parse `{}` as a valid token!", &t_string))
+                    .unwrap_or_else(|_| panic!("Field `{}`: failed to parse `{}` as a valid token!", ident, &t_string))
             }
-            None => default,
+            None => match (default_attribute, required_attribute) {
+                (Some(default), None) => {
+                    default.parse_args().unwrap_or_else(|e| panic!("Field `{}`: failed to parse default value: {}", ident, e))
+                },
+                (None, Some(_)) => panic!("Field `{}`: required but no value was provided in the config file.", ident),
+                _ => panic!("Field `{}`: expected exactly one of `#[required]` or `#[default(...)]` to be provided.", ident),
+            },
         };
 
+        let ty = field.ty;
         quote! {
             pub #ident: #ty,
         }
